@@ -1,65 +1,89 @@
 # Atelier — Suivi des interventions
 
-Application pédagogique conteneurisée pour le module **Conteneur et orchestration**.
-**Application publique :** [https://atelier-ynov.duckdns.org](https://atelier-ynov.duckdns.org)
+Application web pédagogique réalisée pour le module **Conteneur et orchestration**.
 
-Déploiement sur un Droplet DigitalOcean, exposé par Caddy avec un certificat Let’s Encrypt obtenu et renouvelé automatiquement via ACME.
+**Application publique : [https://atelier-ynov.duckdns.org](https://atelier-ynov.duckdns.org)**
 
+Atelier permet de créer, rechercher, modifier et supprimer des demandes d’intervention. La version finale est déployée sur un Droplet DigitalOcean et exposée en HTTPS par Caddy.
 
-Elle permet de créer, rechercher, modifier et supprimer des demandes d’intervention.
-
-## Architecture
+## Architecture finale
 
 ```mermaid
 flowchart LR
-    U[Utilisateur] --> I{Accès Internet}
-    I -->|VM publique| C[Caddy]
-    I -->|Réseau restreint| T[Cloudflare Tunnel]
-    T --> C
-    C --> F[Frontend Nginx]
-    F -->|/api| B[Backend Node.js]
-    B --> D[(PostgreSQL)]
-    D --- V[Volume persistant]
+    U[Utilisateur] -->|atelier-ynov.duckdns.org| C[Caddy]
+    C -->|Réseau edge| F[Frontend Nginx]
+    F -->|/api - Réseau application| B[Backend Node.js]
+    B -->|Réseau database| D[(PostgreSQL)]
+    D --- V[(Volume postgres_data)]
 ```
 
 | Service | Image | Rôle |
 | --- | --- | --- |
-| `frontend` | `ghcr.io/louis-slr/atelier-frontend:1.0.0` | Interface Vite servie par Nginx |
-| `backend` | `ghcr.io/louis-slr/atelier-backend:1.0.0` | API Node.js |
-| `db` | `postgres:17.6-alpine` | Persistance PostgreSQL |
-| `caddy` | `caddy:2.10.2-alpine` | Reverse proxy et HTTPS |
-| `cloudflared` | `cloudflare/cloudflared:2026.10.4` | Tunnel temporaire de démonstration |
+| `caddy` | `caddy:2.10.2-alpine` | Reverse proxy public, HTTPS et renouvellement du certificat |
+| `frontend` | `ghcr.io/louis-slr/atelier-frontend:1.0.0` | Interface Vite servie par Nginx non-root |
+| `backend` | `ghcr.io/louis-slr/atelier-backend:1.0.0` | API Node.js et accès aux données |
+| `db` | `postgres:17.6-alpine` | Base PostgreSQL persistante |
 
-Le navigateur communique uniquement avec le serveur web. Le backend et PostgreSQL ne publient aucun port sur la machine hôte.
+Seul Caddy publie des ports sur la VM : `80` pour HTTP et `443` pour HTTPS. Le frontend, le backend et PostgreSQL communiquent par les réseaux Docker internes.
+
+## Choix de conteneurisation
+
+- les Dockerfiles du frontend et du backend utilisent plusieurs étapes de construction ;
+- les images d’exécution ne contiennent que les fichiers nécessaires ;
+- le backend s’exécute avec l’utilisateur non-root `node` ;
+- le frontend utilise l’image `nginx-unprivileged` ;
+- les images applicatives sont versionnées et stockées dans un registre GHCR privé ;
+- le fichier Compose de production utilise les images du registre et ne contient aucune directive `build` ;
+- des healthchecks contrôlent PostgreSQL, l’API et le frontend ;
+- les données PostgreSQL et les données ACME de Caddy sont conservées dans des volumes Docker.
+
+## Arborescence utile
+
+```text
+.
+├── backend/
+│   ├── Dockerfile
+│   └── src/
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   └── src/
+├── Caddyfile
+├── compose.yaml
+├── compose.prod.yaml
+├── .env.example
+└── .env.production.example
+```
 
 ## Prérequis
 
-- Docker avec Docker Compose ;
+- Docker Engine et Docker Compose ;
 - Git ;
-- accès au registre privé GHCR pour le déploiement ;
-- ports 80 et 443 accessibles pour un déploiement direct.
+- Node.js et npm pour exécuter les tests hors conteneur ;
+- accès au registre privé GHCR pour publier ou télécharger les images ;
+- une VM publique avec les ports TCP `80` et `443` accessibles pour le déploiement.
 
 ## Lancement local
 
-Créer la configuration locale :
+Créer le fichier de configuration locale :
 
 ```bash
 cp .env.example .env
 ```
 
-Construire et démarrer les services :
+Construire les images et démarrer les services :
 
 ```bash
 docker compose up -d --build --wait
 ```
 
-Ouvrir :
+L’application est alors disponible sur :
 
 ```text
 http://localhost:8080
 ```
 
-Vérifier les services :
+Vérifier son état :
 
 ```bash
 docker compose ps
@@ -74,13 +98,13 @@ ok
 {"status":"ok","database":"connected"}
 ```
 
-Arrêter les conteneurs :
+Arrêter l’environnement local :
 
 ```bash
 docker compose down
 ```
 
-Le volume `atelier_postgres_data` conserve les demandes après la recréation des conteneurs.
+Le volume `atelier_postgres_data` est conservé par cette commande.
 
 ## Tests applicatifs
 
@@ -92,6 +116,8 @@ npm ci
 npm test
 ```
 
+Le backend possède sept tests couvrant notamment le healthcheck, les opérations CRUD, la validation des entrées et l’indisponibilité de PostgreSQL.
+
 Frontend :
 
 ```bash
@@ -102,38 +128,48 @@ npm run build
 
 ## Construction des images
 
+Images locales :
+
 ```bash
 docker build -t atelier-backend:local ./backend
 docker build -t atelier-frontend:local ./frontend
 ```
 
-Les deux Dockerfiles utilisent plusieurs étapes afin de ne conserver que les fichiers nécessaires à l’exécution. Les conteneurs applicatifs s’exécutent avec des utilisateurs non-root.
-
-## Publication dans le registre privé
-
-Authentification avec GitHub CLI :
-
-```bash
-gh auth token | docker login ghcr.io -u Louis-SLR --password-stdin
-```
-
-Construction :
+Images destinées au registre :
 
 ```bash
 docker build -t ghcr.io/louis-slr/atelier-backend:1.0.0 ./backend
 docker build -t ghcr.io/louis-slr/atelier-frontend:1.0.0 ./frontend
 ```
 
-Publication :
+## Publication dans GHCR
+
+S’authentifier avec un jeton GitHub disposant du droit `write:packages` :
+
+```bash
+gh auth token | docker login ghcr.io -u Louis-SLR --password-stdin
+```
+
+Publier les images :
 
 ```bash
 docker push ghcr.io/louis-slr/atelier-backend:1.0.0
 docker push ghcr.io/louis-slr/atelier-frontend:1.0.0
 ```
 
-## Déploiement direct sur une VM publique
+Les deux paquets GHCR sont privés. Une machine de déploiement doit disposer du droit `read:packages` pour les télécharger.
 
-Préparer la configuration :
+## Déploiement en production
+
+La production utilise :
+
+- un Droplet DigitalOcean sous Ubuntu 24.04 LTS ;
+- le domaine `atelier-ynov.duckdns.org` ;
+- `compose.prod.yaml` ;
+- les images `1.0.0` publiées dans GHCR ;
+- Caddy comme reverse proxy et client ACME.
+
+### 1. Préparer la configuration
 
 ```bash
 cp .env.production.example .env.production
@@ -141,139 +177,178 @@ cp .env.production.example .env.production
 
 Renseigner dans `.env.production` :
 
-- le domaine public ;
-- une adresse électronique valide pour ACME ;
-- un mot de passe PostgreSQL aléatoire.
+```dotenv
+DOMAIN=atelier-ynov.duckdns.org
+ACME_EMAIL=adresse-valide@example.com
+POSTGRES_DB=atelier
+POSTGRES_USER=atelier
+POSTGRES_PASSWORD=mot-de-passe-long-et-aleatoire
+```
 
-Génération possible du mot de passe :
+Un secret peut être généré avec :
 
 ```bash
 openssl rand -hex 32
 ```
 
-Le domaine doit pointer vers la VM et les ports TCP 80 et 443 doivent être accessibles.
+Le fichier `.env.production` contient des secrets et ne doit jamais être versionné.
 
-Déployer les images du registre :
+### 2. Préparer la VM
 
-```bash
-docker compose \
-  --env-file .env.production \
-  -f compose.prod.yaml \
-  pull
-
-docker compose \
-  --env-file .env.production \
-  -f compose.prod.yaml \
-  up -d --no-build --wait
-```
-
-Caddy obtient et renouvelle automatiquement le certificat public, puis redirige HTTP vers HTTPS.
-
-## Démonstration depuis un réseau restreint
-
-Le réseau de l’école ne permet pas de rediriger les ports entrants vers le poste. Un Quick Tunnel Cloudflare permet donc une démonstration temporaire.
-
-Préparer la configuration :
-
-```bash
-cp .env.tunnel.example .env.tunnel
-```
-
-Remplacer le mot de passe PostgreSQL dans `.env.tunnel`, puis lancer :
-
-```bash
-docker compose \
-  --env-file .env.tunnel \
-  -f compose.prod.yaml \
-  -f compose.tunnel.yaml \
-  pull
-
-docker compose \
-  --env-file .env.tunnel \
-  -f compose.prod.yaml \
-  -f compose.tunnel.yaml \
-  up -d --no-build --wait
-```
-
-Afficher l’URL publique :
-
-```bash
-docker compose \
-  --env-file .env.tunnel \
-  -f compose.prod.yaml \
-  -f compose.tunnel.yaml \
-  logs cloudflared
-```
-
-Cloudflare fournit une URL temporaire de la forme :
+Copier sur la VM les fichiers suivants :
 
 ```text
-https://exemple.trycloudflare.com
+/opt/atelier/compose.prod.yaml
+/opt/atelier/Caddyfile
+/opt/atelier/.env.production
 ```
 
-Dans ce mode, Cloudflare termine la connexion HTTPS publique et transmet les requêtes par un tunnel sortant. Caddy reste le reverse proxy interne de l’application.
+Protéger le fichier d’environnement :
 
-Arrêter la démonstration :
+```bash
+chmod 600 /opt/atelier/.env.production
+```
+
+Le domaine DuckDNS doit résoudre vers l’adresse IPv4 publique de la VM. Les ports `80` et `443` doivent être autorisés par le pare-feu.
+
+### 3. Télécharger et démarrer les images
+
+Après authentification au registre privé :
+
+```bash
+cd /opt/atelier
+
+docker compose \
+  --env-file .env.production \
+  -f compose.prod.yaml \
+  pull
+
+docker compose \
+  --env-file .env.production \
+  -f compose.prod.yaml \
+  up -d --no-build --wait
+```
+
+Contrôler le résultat :
 
 ```bash
 docker compose \
-  --env-file .env.tunnel \
+  --env-file .env.production \
   -f compose.prod.yaml \
-  -f compose.tunnel.yaml \
-  down
+  ps
 ```
+
+## HTTPS, Let’s Encrypt et ACME
+
+Caddy reçoit les requêtes publiques et transmet le trafic au frontend Nginx.
+
+Au premier démarrage, Caddy :
+
+1. contacte le serveur ACME de production de Let’s Encrypt ;
+2. prouve le contrôle du domaine public ;
+3. obtient un certificat signé pour `atelier-ynov.duckdns.org` ;
+4. sert l’application en HTTPS ;
+5. redirige automatiquement HTTP vers HTTPS ;
+6. renouvelle le certificat avant son expiration.
+
+Les volumes `caddy_data` et `caddy_config` conservent les informations ACME et les certificats.
 
 ## Réseaux et volumes
 
-| Élément | Accès |
-| --- | --- |
-| Réseau `edge` | Caddy, frontend et tunnel |
-| Réseau `application` | Frontend et backend |
-| Réseau `database` | Backend et PostgreSQL |
-| Volume PostgreSQL | Données applicatives |
-| Volume Caddy | Certificats et configuration persistante |
+| Élément | Services ou données | Exposition |
+| --- | --- | --- |
+| Réseau `edge` | Caddy et frontend | Entrée HTTP et HTTPS |
+| Réseau `application` | Frontend et backend | Interne |
+| Réseau `database` | Backend et PostgreSQL | Interne |
+| Volume `postgres_data` | Données PostgreSQL | Persistant |
+| Volume `caddy_data` | Certificats et compte ACME | Persistant |
+| Volume `caddy_config` | Configuration persistante de Caddy | Persistant |
 
-Les réseaux `application` et `database` sont internes. PostgreSQL n’est jamais directement accessible depuis Internet.
+PostgreSQL n’est jamais directement accessible depuis Internet.
 
-## Commandes de diagnostic
+## Vérifications de production
+
+Depuis un poste client :
 
 ```bash
-docker compose ps
-docker compose logs --tail=100
-docker image ls
+curl -I http://atelier-ynov.duckdns.org
+curl -I https://atelier-ynov.duckdns.org
+curl -sS https://atelier-ynov.duckdns.org/healthz
+curl -sS https://atelier-ynov.duckdns.org/api/health
+```
+
+Résultats attendus :
+
+- HTTP répond `308 Permanent Redirect` vers HTTPS ;
+- HTTPS répond `200` ;
+- `/healthz` répond `ok` ;
+- `/api/health` répond `{"status":"ok","database":"connected"}`.
+
+Vérifier le certificat :
+
+```bash
+echo | openssl s_client \
+  -connect atelier-ynov.duckdns.org:443 \
+  -servername atelier-ynov.duckdns.org 2>/dev/null | \
+openssl x509 -noout -subject -issuer -dates
+```
+
+## Diagnostic et maintenance
+
+Les commandes de production doivent préciser le fichier Compose et le fichier d’environnement :
+
+```bash
+cd /opt/atelier
+
+docker compose --env-file .env.production -f compose.prod.yaml ps
+docker compose --env-file .env.production -f compose.prod.yaml logs --tail=100
+docker compose --env-file .env.production -f compose.prod.yaml logs --tail=100 caddy
+docker compose --env-file .env.production -f compose.prod.yaml logs --tail=100 backend
+docker stats --no-stream
 docker volume ls
 docker network ls
 ```
 
-Consulter un service particulier :
+Mettre à jour le déploiement après la publication de nouvelles images :
 
 ```bash
-docker compose logs --tail=100 backend
-docker compose logs --tail=100 frontend
-docker compose logs --tail=100 db
+docker compose --env-file .env.production -f compose.prod.yaml pull
+docker compose --env-file .env.production -f compose.prod.yaml up -d --no-build --wait
 ```
 
-## Attention aux volumes
+## Persistance et suppression
 
-Cette commande conserve les données :
+Cette commande supprime les conteneurs et les réseaux, mais conserve les volumes :
 
 ```bash
-docker compose down
+docker compose --env-file .env.production -f compose.prod.yaml down
 ```
 
-Cette commande supprime aussi les volumes et les demandes enregistrées :
+La commande suivante supprime également les données PostgreSQL et les données persistantes de Caddy :
 
 ```bash
-docker compose down -v
+docker compose --env-file .env.production -f compose.prod.yaml down -v
 ```
 
-Ne pas utiliser `-v` pendant une démonstration de persistance.
+Ne pas utiliser l’option `-v` pendant une démonstration ou sans sauvegarde préalable.
 
-Le mot de passe PostgreSQL est appliqué uniquement lors de la première création du volume. Modifier ensuite le fichier d’environnement ne modifie pas automatiquement le mot de passe de la base existante.
+Le mot de passe PostgreSQL est appliqué lors de la première création du volume. Modifier ensuite `.env.production` ne change pas automatiquement le mot de passe stocké dans une base existante.
+
+## Ancienne solution de secours
+
+Les fichiers `compose.tunnel.yaml` et `.env.tunnel.example` correspondent au Quick Tunnel Cloudflare testé avant l’obtention de la VM publique.
+
+**Cloudflare Tunnel ne fait pas partie de l’architecture finale et n’est pas utilisé par le déploiement DigitalOcean.** Ces fichiers sont uniquement conservés comme solution de démonstration de secours.
 
 ## Limites
 
-- Application pédagogique sans authentification.
-- Utiliser uniquement des données fictives.
-- Le Quick Tunnel est temporaire et destiné à la démonstration.
-- Les fichiers `.env`, `.env.production` et `.env.tunnel` ne doivent jamais être versionnés.
+- l’application ne possède pas d’authentification ;
+- seules des données fictives doivent être utilisées ;
+- la VM est dimensionnée pour une démonstration pédagogique ;
+- les sauvegardes PostgreSQL et le déploiement automatisé ne sont pas inclus ;
+- les fichiers `.env`, `.env.production` et `.env.tunnel` ne doivent jamais être versionnés.
+
+## Documentation complémentaire
+
+- [`docs/CONTENEURISATION.md`](docs/CONTENEURISATION.md) : architecture et choix de conteneurisation ;
+- [`docs/VERIFICATION.md`](docs/VERIFICATION.md) : bilan des tests et vérifications finales.
