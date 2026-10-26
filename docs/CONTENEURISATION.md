@@ -1,62 +1,86 @@
-# Travail de conteneurisation à réaliser
+# Architecture de conteneurisation
 
-## Livrables attendus
+## Résultat
 
-1. Une image frontend qui sert le build de l’interface.
-2. Une image backend qui exécute l’API.
-3. Un Compose local permettant de construire et lancer l’ensemble avec PostgreSQL.
-4. Les deux images applicatives publiées dans un registre privé.
-5. Un Compose de « production » qui référence ces images, sans `build:`.
-6. Un README expliquant les commandes et les choix de votre équipe.
+L'application Atelier est entièrement conteneurisée et déployable avec Docker Compose.
 
-La base peut utiliser une image officielle : inutile de reconstruire PostgreSQL.
-Le nom « production » désigne ici un déploiement reproductible pour l’exercice,
-pas une application sécurisée et prête à être exposée à Internet.
+Les livrables réalisés sont :
 
-## Pistes pour les images
+1. une image frontend multi-stage ;
+2. une image backend multi-stage ;
+3. un environnement local avec PostgreSQL ;
+4. deux images applicatives publiées sur le registre privé GHCR ;
+5. un environnement de production sans directive `build:` ;
+6. un reverse proxy Caddy avec HTTPS automatique ;
+7. un volume PostgreSQL persistant et des réseaux segmentés.
 
-### Frontend
+## Images applicatives
 
-Le multi-stage a ici un intérêt direct : construire avec Node et Vite, puis
-copier uniquement `dist/` dans une image de serveur web. Node et les dépendances
-de build ne sont plus nécessaires dans l’image finale.
+| Image | Construction | Exécution |
+| --- | --- | --- |
+| `ghcr.io/louis-slr/atelier-frontend:1.0.0` | Node.js 24 et Vite | Nginx non-root sur le port 8080 |
+| `ghcr.io/louis-slr/atelier-backend:1.0.0` | Installation des dépendances de production | Node.js non-root sur le port 3000 |
 
-Configurer le reverse proxy `/api/` vers le backend. Conserver le chemin complet.
-Un appel `/api/tickets` doit arriver sur `/api/tickets`, pas `/tickets`.
+Les fichiers `.dockerignore` excluent les dépendances locales, les tests, les secrets et les fichiers inutiles des contextes de construction.
 
-### Backend
+## Orchestration
 
-Le JavaScript n’exige pas de compilation. Vous pouvez néanmoins utiliser une
-étape d’installation (`npm ci --omit=dev`) puis transférer les dépendances
-de production et `src/` vers l’étape finale. Cela exclut notamment PGlite.
-N’utilisez pas une étape de build artificielle : expliquez l’intérêt réel
-de votre découpage et mesurez la taille des images.
+### Environnement local
 
-Exécuter `node src/server.js`, avec `HOST=0.0.0.0`, `PORT=3000` et `DATABASE_URL`.
-Les environnements de construction et d’exécution doivent être compatibles.
-Prévoyez un utilisateur non-root et un `.dockerignore` pour chaque contexte.
+Le fichier `compose.yaml` construit les images et démarre :
 
-## Points à vérifier dans Compose
+- le frontend ;
+- le backend ;
+- PostgreSQL.
 
-- Le navigateur accède seulement au serveur web ; API et base peuvent rester internes.
-- Les conteneurs utilisent les noms de services pour communiquer.
-- `localhost` dans un conteneur désigne ce conteneur, pas PostgreSQL ni votre PC.
-- Les données PostgreSQL sont dans un volume persistant adapté à la version choisie.
-- L’API attend que PostgreSQL soit sain ; l’ordre de lancement seul ne suffit pas.
-- Le contrôle `/api/health` vérifie bien la connexion à la base.
-- Les mots de passe restent hors du code et des images. Ne versionnez pas `.env`.
-- Fixez les versions des images ; utilisez un tag explicite pour vos images.
-- Authentifiez-vous au registre avant de pousser ou tirer des images privées.
-- Ne publiez pas de ports inutilement. Évitez d’exposer PostgreSQL en production.
+Seul le frontend est publié sur `127.0.0.1:8080`. Les healthchecks et les dépendances `service_healthy` garantissent un ordre de démarrage fonctionnel.
 
-## Démonstration à préparer
+### Environnement de production
 
-1. Lancer les trois services et ouvrir l’application.
-2. Créer une demande et changer son statut.
-3. Redémarrer les services et montrer la persistance.
-4. Montrer les tailles de vos images finales.
-5. Récupérer les images du registre privé avec le Compose de production.
-6. Expliquer la différence entre configuration locale et configuration conteneurisée.
+Le fichier `compose.prod.yaml` référence uniquement des images versionnées. Il ne contient aucune directive `build:`.
 
-Ne supprimez pas les volumes pendant la démonstration de persistance.
-Une suppression de volume peut effacer toutes les demandes.
+Il ajoute Caddy devant le frontend. Seul Caddy publie les ports 80 et 443. Le backend et PostgreSQL restent accessibles uniquement sur leurs réseaux Docker internes.
+
+## Réseaux
+
+| Réseau | Services | Exposition |
+| --- | --- | --- |
+| `edge` | Caddy et frontend | Entrée HTTP/HTTPS |
+| `application` | Frontend et backend | Interne |
+| `database` | Backend et PostgreSQL | Interne |
+
+Cette séparation empêche l'accès direct à PostgreSQL depuis Internet.
+
+## Persistance
+
+Le volume `postgres_data` conserve les demandes lors de la suppression et de la recréation des conteneurs.
+
+Les volumes `caddy_data` et `caddy_config` conservent le compte ACME, les certificats et la configuration persistante de Caddy.
+
+La commande `docker compose down` conserve les volumes. L'option `-v` les supprime et ne doit pas être utilisée pendant une démonstration de persistance.
+
+## Registre privé
+
+Les images frontend et backend sont stockées dans GHCR avec le tag `1.0.0`. Le registre est privé et nécessite une authentification disposant du droit `read:packages` pour les télécharger.
+
+Les identifiants du registre et les fichiers d'environnement ne sont pas inclus dans les images.
+
+## HTTPS, Let's Encrypt et ACME
+
+Le domaine public est :
+
+<https://atelier-ynov.duckdns.org>
+
+DuckDNS résout ce domaine vers le Droplet DigitalOcean. Caddy agit comme reverse proxy et client ACME :
+
+1. Caddy prouve le contrôle du domaine ;
+2. Let's Encrypt délivre un certificat signé ;
+3. Caddy sert l'application en HTTPS ;
+4. le certificat est renouvelé automatiquement ;
+5. les requêtes HTTP sont redirigées vers HTTPS.
+
+Le fichier `Caddyfile` sélectionne explicitement le serveur ACME de production de Let's Encrypt.
+
+## Démonstration de secours
+
+`compose.tunnel.yaml` permet une démonstration temporaire avec Cloudflare Quick Tunnel lorsqu'aucune VM publique n'est disponible. Ce mode n'est pas utilisé pour le déploiement final DigitalOcean.
