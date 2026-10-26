@@ -1,0 +1,14 @@
+{
+	email {$ACME_EMAIL}
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy frontend:8080
+
+	log {
+		output stdout
+		format console
+	}
+}
