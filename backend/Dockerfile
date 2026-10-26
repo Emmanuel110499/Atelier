@@ -8,6 +8,10 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:24-alpine AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/Louis-SLR/Atelier" \
+      org.opencontainers.image.title="Atelier Backend" \
+      org.opencontainers.image.description="API Node.js de suivi des interventions"
+
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=3000
