@@ -1,138 +1,279 @@
 # Atelier — Suivi des interventions
 
-Une petite application pédagogique pour le module **Conteneur et orchestration**.
-Elle permet de créer une demande, choisir sa priorité, suivre son statut,
-rechercher les interventions et supprimer une demande avec confirmation.
+Application pédagogique conteneurisée pour le module **Conteneur et orchestration**.
+**Application publique :** [https://atelier-ynov.duckdns.org](https://atelier-ynov.duckdns.org)
 
-**Le code applicatif est fourni. La conteneurisation reste à réaliser par l’étudiant.**
-Il n’y a volontairement aucun Dockerfile, fichier Compose ou registre préconfiguré.
+Déploiement sur un Droplet DigitalOcean, exposé par Caddy avec un certificat Let’s Encrypt obtenu et renouvelé automatiquement via ACME.
+
+
+Elle permet de créer, rechercher, modifier et supprimer des demandes d’intervention.
 
 ## Architecture
 
-| Composant | Technologie | Rôle |
-| --- | --- | --- |
-| Frontend | JavaScript, CSS et Vite | Interface et appels HTTP vers `/api` |
-| Backend | Node.js, HTTP natif et `pg` | Validation, API REST et requêtes SQL |
-| Base | PostgreSQL | Persistance des demandes |
+```mermaid
+flowchart LR
+    U[Utilisateur] --> I{Accès Internet}
+    I -->|VM publique| C[Caddy]
+    I -->|Réseau restreint| T[Cloudflare Tunnel]
+    T --> C
+    C --> F[Frontend Nginx]
+    F -->|/api| B[Backend Node.js]
+    B --> D[(PostgreSQL)]
+    D --- V[Volume persistant]
+```
 
-Le frontend utilise des URL relatives `/api/...`. En développement, Vite transmet
-ces requêtes à l’API. Pour la production, votre serveur web (par exemple Nginx)
-devra servir `frontend/dist` et transmettre `/api/` au backend, **sans supprimer
-le préfixe `/api`**. Le navigateur ne doit pas appeler un nom interne Docker.
-Cela évite aussi d’avoir à configurer CORS.
+| Service | Image | Rôle |
+| --- | --- | --- |
+| `frontend` | `ghcr.io/louis-slr/atelier-frontend:1.0.0` | Interface Vite servie par Nginx |
+| `backend` | `ghcr.io/louis-slr/atelier-backend:1.0.0` | API Node.js |
+| `db` | `postgres:17.6-alpine` | Persistance PostgreSQL |
+| `caddy` | `caddy:2.10.2-alpine` | Reverse proxy et HTTPS |
+| `cloudflared` | `cloudflare/cloudflared:2026.10.4` | Tunnel temporaire de démonstration |
+
+Le navigateur communique uniquement avec le serveur web. Le backend et PostgreSQL ne publient aucun port sur la machine hôte.
 
 ## Prérequis
 
-- Node.js **22.12 ou supérieur** et npm (Node 24 utilisé pour les tests).
-- PostgreSQL **16 ou supérieur**, installé localement pour le démarrage initial.
-- Trois terminaux : base / backend / frontend selon votre installation.
+- Docker avec Docker Compose ;
+- Git ;
+- accès au registre privé GHCR pour le déploiement ;
+- ports 80 et 443 accessibles pour un déploiement direct.
 
-## 1. Préparer PostgreSQL
+## Lancement local
 
-Ouvrir `psql` en administrateur PostgreSQL (sur Linux : `sudo -u postgres psql`,
-sur Windows : SQL Shell ou l’outil de requêtes de pgAdmin).
-
-```sql
-CREATE ROLE atelier LOGIN PASSWORD 'change-me-local-only';
-CREATE DATABASE atelier OWNER atelier;
-```
-
-Ces identifiants sont réservés à la démonstration locale. Si vous les changez,
-modifiez aussi `DATABASE_URL`. Le serveur PostgreSQL doit écouter sur le port 5432.
-La table `tickets` est créée automatiquement par l’API au démarrage.
-
-## 2. Démarrer le backend
-
-Depuis `atelier/backend` :
+Créer la configuration locale :
 
 ```bash
-npm ci
 cp .env.example .env
-npm run seed
-npm start
 ```
 
-Sous PowerShell, remplacer `cp .env.example .env` par :
-
-```powershell
-Copy-Item .env.example .env
-```
-
-`seed` ajoute quatre demandes uniquement si la table est vide. Il est facultatif.
-L’API écoute par défaut sur `http://127.0.0.1:3000`.
-Vérification : ouvrir `http://127.0.0.1:3000/api/health`.
-
-## 3. Démarrer le frontend
-
-Dans un autre terminal, depuis `atelier/frontend` :
+Construire et démarrer les services :
 
 ```bash
-npm ci
-npm run dev
+docker compose up -d --build --wait
 ```
 
-Ouvrir **http://127.0.0.1:5173**. L’API doit rester démarrée.
-Les données survivent au redémarrage de l’API car elles sont dans PostgreSQL.
+Ouvrir :
 
-## 4. Tester et construire
+```text
+http://localhost:8080
+```
+
+Vérifier les services :
+
+```bash
+docker compose ps
+curl http://localhost:8080/healthz
+curl http://localhost:8080/api/health
+```
+
+Résultats attendus :
+
+```text
+ok
+{"status":"ok","database":"connected"}
+```
+
+Arrêter les conteneurs :
+
+```bash
+docker compose down
+```
+
+Le volume `atelier_postgres_data` conserve les demandes après la recréation des conteneurs.
+
+## Tests applicatifs
 
 Backend :
 
 ```bash
+cd backend
+npm ci
 npm test
 ```
-
-Les tests exécutent les routes HTTP et les requêtes SQL avec **PGlite**, un moteur
-PostgreSQL embarqué en WASM. Cela ne remplace pas le test de connexion réseau à
-votre vrai serveur PostgreSQL. Cette dépendance est uniquement de développement.
 
 Frontend :
 
 ```bash
+cd frontend
+npm ci
 npm run build
-npm run preview
 ```
 
-Le build produit `dist/`. La prévisualisation locale est sur
-`http://127.0.0.1:4173` et transmet également `/api` au backend.
-**Vite preview n’est pas le serveur web de production prévu.**
+## Construction des images
 
-## Configuration
+```bash
+docker build -t atelier-backend:local ./backend
+docker build -t atelier-frontend:local ./frontend
+```
 
-| Variable | Service | Valeur locale | Pour les conteneurs |
-| --- | --- | --- | --- |
-| `HOST` | Backend | `127.0.0.1` | `0.0.0.0` pour écouter hors du conteneur |
-| `PORT` | Backend | `3000` | Port interne de l’API |
-| `DATABASE_URL` | Backend | Voir `.env.example` | Utiliser le nom du service PostgreSQL, pas `localhost` |
-| `API_PROXY_TARGET` | Vite local | `http://127.0.0.1:3000` | Facultatif en développement ; Nginx prend le relais en production |
+Les deux Dockerfiles utilisent plusieurs étapes afin de ne conserver que les fichiers nécessaires à l’exécution. Les conteneurs applicatifs s’exécutent avec des utilisateurs non-root.
 
-`npm start` attend un fichier `.env` pour faciliter le lancement local.
-Dans votre future image, lancez **`node src/server.js`** et fournissez les variables
-par l’environnement du conteneur. Ne copiez pas `.env` dans une image.
+## Publication dans le registre privé
 
-## Routes API
+Authentification avec GitHub CLI :
 
-| Méthode | Route | Fonction |
-| --- | --- | --- |
-| GET | `/api/health` | 200 si la base répond, 503 sinon |
-| GET | `/api/tickets` | Liste des demandes, plus récentes en premier |
-| POST | `/api/tickets` | Création : `title`, `requester`, `description` facultative, `priority` facultative |
-| PATCH | `/api/tickets/:id` | Changement du `status` |
-| DELETE | `/api/tickets/:id` | Suppression définitive |
+```bash
+gh auth token | docker login ghcr.io -u Louis-SLR --password-stdin
+```
 
-Priorités : `low`, `normal`, `high`. Statuts : `new`, `in_progress`, `done`.
+Construction :
 
-## Limites assumées
+```bash
+docker build -t ghcr.io/louis-slr/atelier-backend:1.0.0 ./backend
+docker build -t ghcr.io/louis-slr/atelier-frontend:1.0.0 ./frontend
+```
 
-- Démonstration locale : **aucune authentification**, pas d’exposition publique.
-- Pas de données personnelles réelles ou confidentielles.
-- Pas de pièces jointes, rôles utilisateurs, notifications ou pagination.
-- Initialisation simple du schéma, pas de système de migrations.
-- Le healthcheck répond 503 si la base tombe ; l’API échoue au démarrage si la base
-  est indisponible. Votre orchestration devra gérer cette dépendance.
+Publication :
 
-## Suite du projet
+```bash
+docker push ghcr.io/louis-slr/atelier-backend:1.0.0
+docker push ghcr.io/louis-slr/atelier-frontend:1.0.0
+```
 
-Voir `docs/CONTENEURISATION.md` pour les objectifs et points de vigilance,
-sans solution Docker prête à copier. Voir `docs/VERIFICATION.md` pour le bilan
-des vérifications effectuées sur le livrable.
+## Déploiement direct sur une VM publique
+
+Préparer la configuration :
+
+```bash
+cp .env.production.example .env.production
+```
+
+Renseigner dans `.env.production` :
+
+- le domaine public ;
+- une adresse électronique valide pour ACME ;
+- un mot de passe PostgreSQL aléatoire.
+
+Génération possible du mot de passe :
+
+```bash
+openssl rand -hex 32
+```
+
+Le domaine doit pointer vers la VM et les ports TCP 80 et 443 doivent être accessibles.
+
+Déployer les images du registre :
+
+```bash
+docker compose \
+  --env-file .env.production \
+  -f compose.prod.yaml \
+  pull
+
+docker compose \
+  --env-file .env.production \
+  -f compose.prod.yaml \
+  up -d --no-build --wait
+```
+
+Caddy obtient et renouvelle automatiquement le certificat public, puis redirige HTTP vers HTTPS.
+
+## Démonstration depuis un réseau restreint
+
+Le réseau de l’école ne permet pas de rediriger les ports entrants vers le poste. Un Quick Tunnel Cloudflare permet donc une démonstration temporaire.
+
+Préparer la configuration :
+
+```bash
+cp .env.tunnel.example .env.tunnel
+```
+
+Remplacer le mot de passe PostgreSQL dans `.env.tunnel`, puis lancer :
+
+```bash
+docker compose \
+  --env-file .env.tunnel \
+  -f compose.prod.yaml \
+  -f compose.tunnel.yaml \
+  pull
+
+docker compose \
+  --env-file .env.tunnel \
+  -f compose.prod.yaml \
+  -f compose.tunnel.yaml \
+  up -d --no-build --wait
+```
+
+Afficher l’URL publique :
+
+```bash
+docker compose \
+  --env-file .env.tunnel \
+  -f compose.prod.yaml \
+  -f compose.tunnel.yaml \
+  logs cloudflared
+```
+
+Cloudflare fournit une URL temporaire de la forme :
+
+```text
+https://exemple.trycloudflare.com
+```
+
+Dans ce mode, Cloudflare termine la connexion HTTPS publique et transmet les requêtes par un tunnel sortant. Caddy reste le reverse proxy interne de l’application.
+
+Arrêter la démonstration :
+
+```bash
+docker compose \
+  --env-file .env.tunnel \
+  -f compose.prod.yaml \
+  -f compose.tunnel.yaml \
+  down
+```
+
+## Réseaux et volumes
+
+| Élément | Accès |
+| --- | --- |
+| Réseau `edge` | Caddy, frontend et tunnel |
+| Réseau `application` | Frontend et backend |
+| Réseau `database` | Backend et PostgreSQL |
+| Volume PostgreSQL | Données applicatives |
+| Volume Caddy | Certificats et configuration persistante |
+
+Les réseaux `application` et `database` sont internes. PostgreSQL n’est jamais directement accessible depuis Internet.
+
+## Commandes de diagnostic
+
+```bash
+docker compose ps
+docker compose logs --tail=100
+docker image ls
+docker volume ls
+docker network ls
+```
+
+Consulter un service particulier :
+
+```bash
+docker compose logs --tail=100 backend
+docker compose logs --tail=100 frontend
+docker compose logs --tail=100 db
+```
+
+## Attention aux volumes
+
+Cette commande conserve les données :
+
+```bash
+docker compose down
+```
+
+Cette commande supprime aussi les volumes et les demandes enregistrées :
+
+```bash
+docker compose down -v
+```
+
+Ne pas utiliser `-v` pendant une démonstration de persistance.
+
+Le mot de passe PostgreSQL est appliqué uniquement lors de la première création du volume. Modifier ensuite le fichier d’environnement ne modifie pas automatiquement le mot de passe de la base existante.
+
+## Limites
+
+- Application pédagogique sans authentification.
+- Utiliser uniquement des données fictives.
+- Le Quick Tunnel est temporaire et destiné à la démonstration.
+- Les fichiers `.env`, `.env.production` et `.env.tunnel` ne doivent jamais être versionnés.
